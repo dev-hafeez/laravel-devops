@@ -34,18 +34,24 @@ pipeline {
 
                         cp .env.example .env
 
-                        sed -i '/^APP_KEY=/d' .env
-                        printf 'APP_KEY=%s\\n' "$APP_KEY_VALUE" >> .env
+                        set_env() {
+                            key="$1"
+                            val="$2"
+                            if grep -q "^#\\? *${key}=" .env; then
+                                sed -i "s|^#\\? *${key}=.*|${key}=${val}|" .env
+                            else
+                                printf '%s=%s\\n' "$key" "$val" >> .env
+                            fi
+                        }
 
-                        sed -i '/^DB_PASSWORD=/d' .env
-                        printf 'DB_PASSWORD=%s\\n' "$DB_PASSWORD_VALUE" >> .env
-
-                        sed -i '/^DB_ROOT_PASSWORD=/d' .env
-                        printf 'DB_ROOT_PASSWORD=%s\\n' "$DB_ROOT_PASSWORD_VALUE" >> .env
-
-                        sed -i 's/^DB_CONNECTION=.*/DB_CONNECTION=mysql/' .env
-                        sed -i 's/^DB_HOST=.*/DB_HOST=db/' .env
-                        sed -i 's/^DB_PORT=.*/DB_PORT=3306/' .env
+                        set_env "APP_KEY" "$APP_KEY_VALUE"
+                        set_env "DB_CONNECTION" "mysql"
+                        set_env "DB_HOST" "db"
+                        set_env "DB_PORT" "3306"
+                        set_env "DB_DATABASE" "laravel"
+                        set_env "DB_USERNAME" "laravel_user"
+                        set_env "DB_PASSWORD" "$DB_PASSWORD_VALUE"
+                        set_env "DB_ROOT_PASSWORD" "$DB_ROOT_PASSWORD_VALUE"
 
                         chmod 644 .env
                     '''
@@ -73,19 +79,28 @@ pipeline {
         stage('Wait for Database') {
             steps {
                 sh '''
+                    echo "Waiting for database and network readiness from app container..."
                     for i in $(seq 1 30); do
-                        if docker compose exec -T db \
-                            mysqladmin ping -h 127.0.0.1 \
-                            --silent; then
-                            echo "Database is ready."
+                        if docker compose exec -T app php -r "
+                            try {
+                                \\$pdo = new PDO('mysql:host=db;port=3306;dbname=laravel', 'laravel_user', getenv('DB_PASSWORD'), [
+                                    PDO::ATTR_TIMEOUT => 3,
+                                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                                ]);
+                                exit(0);
+                            } catch (Throwable \\$e) {
+                                exit(1);
+                            }
+                        "; then
+                            echo "Database connection and DNS resolution verified from app container."
                             exit 0
                         fi
 
-                        echo "Waiting for database..."
+                        echo "Waiting for database connectivity from app (attempt $i/30)..."
                         sleep 2
                     done
 
-                    echo "Database did not become ready."
+                    echo "Database did not become ready for app container."
                     exit 1
                 '''
             }
@@ -106,7 +121,19 @@ pipeline {
                     docker compose exec -T app php artisan --version
                     docker compose ps
 
-                    echo "Laravel deployment verification completed."
+                    echo "Verifying application HTTP accessibility..."
+                    for i in $(seq 1 15); do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000 || true)
+                        if [ "$STATUS" = "200" ]; then
+                            echo "Application is accessible and returned HTTP $STATUS."
+                            exit 0
+                        fi
+                        echo "Waiting for HTTP 200 response (got: $STATUS, attempt $i/15)..."
+                        sleep 2
+                    done
+
+                    echo "Application failed accessibility check (status: $STATUS)."
+                    exit 1
                 '''
             }
         }
