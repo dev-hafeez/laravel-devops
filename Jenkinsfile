@@ -81,18 +81,8 @@ pipeline {
                 sh '''
                     echo "Waiting for database and network readiness from app container..."
                     for i in $(seq 1 30); do
-                        if docker compose exec -T app php -r "
-                            try {
-                                \\$pdo = new PDO('mysql:host=db;port=3306;dbname=laravel', 'laravel_user', getenv('DB_PASSWORD'), [
-                                    PDO::ATTR_TIMEOUT => 3,
-                                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                                ]);
-                                exit(0);
-                            } catch (Throwable \\$e) {
-                                exit(1);
-                            }
-                        "; then
-                            echo "Database connection and DNS resolution verified from app container."
+                        if docker compose exec -T app php artisan db:monitor; then
+                            echo "Database connection verified from app container."
                             exit 0
                         fi
 
